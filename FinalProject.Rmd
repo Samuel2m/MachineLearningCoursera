@@ -1,0 +1,205 @@
+---
+title: "Prediction Project"
+author: "Samuel"
+date: "5 janvier 2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Machine Learning Final Project
+
+##Introduction
+
+###Background
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+###Data
+The training data for this project are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+The test data are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+
+###Aim of the project
+The goal of your project is to predict the manner in which they did the exercise. This is the “classe” variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases.
+
+
+```{r, echo=FALSE}
+#Importing packages first
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(tidyr)
+library(lubridate)
+library(rpart.plot)
+library(randomForest)
+```
+##Data preparation
+
+
+###Importing the data
+
+```{r}
+setwd("D:/Cours/Coursera/ML")
+
+#Dowlanding training and testing sets
+url1 <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+trainingDL <- basename(url1);
+if (!file.exists(trainingDL)) {
+  download.file(url1, trainingDL, method='curl')
+}
+
+url2 <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+testingDL <- basename(url2);
+if (!file.exists(testingDL)) {
+  download.file(url1, testingDL, method='curl')
+}
+```
+
+```{r}
+#Importing the data
+training <- read.csv(trainingDL)
+testing <- read.csv(testingDL)
+```
+
+
+###Cleaning the data
+
+```{r} 
+#A few columns have only ~400 values out of 19622 filled for each window, and a few of them basically are all "div by 0"
+
+emptyColsTrain2 <- training[which((summarise_all(training, funs(sum(grepl("DIV", .)))) > 100))]
+
+trainingV1 <- training[, !(names(training) %in% names(emptyColsTrain2))]
+testingV1 <- testing[, !(names(training) %in% names(emptyColsTrain2))]
+
+
+#when window is "yes", more measures, so I keep them in a separate dataset to see if any impact
+#and keep another data sets with reduced column numbers
+trainingW = trainingV1 %>% filter(new_window == "yes")
+trainingNW = trainingV1 %>% filter(new_window == "no")
+
+testingW = testingV1 %>% filter(new_window == "yes")
+testingNW = testingV1 %>% filter(new_window == "no")
+
+#Getting the mostly empty columns out
+emptyCols <- trainingNW[,which(summarise_all(trainingNW, funs(sum(grepl("^$", .)))) > 10)]
+trainingNW <- trainingNW[, !(names(trainingNW) %in% names(emptyCols))]
+
+NACols <- trainingNW[,which(summarise_all(trainingNW, funs(sum(is.na(.)))) > 100)]
+trainingNW <- trainingNW[, !(names(trainingNW) %in% names(NACols))]
+testingNW <- testingNW[, (names(testingNW) %in% names(trainingNW))]
+
+#Transforming the time data into hour of the day and day of the week, then deleting the others timestamp and indexes column which hold no informations
+trainingNW2 <- trainingNW %>% mutate(cvtd_timestamp = as.POSIXct((cvtd_timestamp), format = "%d/%m/%Y %H:%M"))
+trainingNW2 <- trainingNW2 %>% 
+    separate(cvtd_timestamp, c("weekday","hour"), sep = " ") 
+trainingNW3 <- trainingNW2 %>% 
+    mutate(weekday = as.factor(weekdays(as.Date(weekday, "%Y-%m-%d"))), hour = as.factor(substr(trainingNW2$hour, 0, 2)))
+trainingNW3 <- trainingNW3 %>% select(-c(1:4,7,8))
+trainingNW3 <- trainingNW3 %>% mutate_at(c(3:54), funs(as.numeric(.)))
+#Converting the day and hour column into dummies
+dmyTrain <- dummyVars( ~ weekday + hour, data = trainingNW3)
+dummyTrain <- data.frame(predict(dmyTrain, newdata = trainingNW3))
+finalTrain <- cbind(dummyTrain, trainingNW3) %>% select(-c(weekday, hour))
+
+#Same for test data
+testingNW2 <- testingNW %>% mutate(cvtd_timestamp = as.POSIXct((cvtd_timestamp), format = "%d/%m/%Y %H:%M"))
+testingNW2 <- testingNW2 %>% 
+    separate(cvtd_timestamp, c("weekday","hour"), sep = " ") 
+testingNW3 <- testingNW2 %>% 
+    mutate(weekday = as.factor(weekdays(as.Date(weekday, "%Y-%m-%d"))), hour = as.factor(substr(testingNW2$hour, 0, 2)))
+testingNW3 <- testingNW3 %>% select(-c(1:4,7,8))
+testingNW3 <- testingNW3 %>% mutate_at(c(3:54), funs(as.numeric(.)))
+
+dmyTest <- dummyVars( ~ weekday + hour, data = testingNW3)
+dummyTest <- data.frame(predict(dmyTest, newdata = testingNW3))
+finalTest <- cbind(dummyTest, testingNW3) %>% select(-c(weekday, hour))
+
+```
+
+```{r}
+#We split the training set into training and testing set to keep the test data as validation set for the out of sample error
+set.seed(123) 
+inTrain <- createDataPartition(finalTrain$classe, p = 3/4, list = FALSE)
+trainData <- finalTrain[inTrain, ]
+testData <- finalTrain[-inTrain, ]
+```
+
+##Prediction
+
+```{r}
+#Let's first start with a simple tree model
+set.seed(123)
+
+modT <- train(classe ~., data = trainData, method = "rpart")
+
+predicT <- predict(modT, newdata = testData)
+
+rpart.plot(modT$finalModel)
+
+confusionMatrix(predicT, testData$classe)
+```
+Only 50% accuracy, with way too many As predicted - very specific for the other classes.
+
+
+```{r}
+#Random forest, I am no using caret package because after 30 minutes, I had still no results
+set.seed(123)
+
+
+modRF <- randomForest(classe ~., data = trainData)
+
+predicTree <- predict(modRF, newdata = testData)
+
+confusionMatrix(predicTree, testData$classe)
+```
+We obtain a (way too) amazing accuracy of 0.9965. There is a risk of overfitting, however the results are still impressive enough.
+
+```{r}
+#Exploring the variable importance
+varImpPlot(modRF,type=2)
+barplot(t(importance(modRF)/sum(importance(modRF))), las=2)
+```
+We can see that the weekday and hour variables that I created have very little impact, and I will take them in my final model.
+
+```{r}
+#trying out an lda classifier
+set.seed(123)
+modLDA <- train(classe ~., data = trainData, method = "lda", trControl=trainControl(method='cv', number=10), verbose = FALSE)
+
+predicLDA <- predict(modLDA, newdata = testData)
+
+confusionMatrix(predicLDA, testData$classe)
+```
+73% accuracy is better than the rpart classifier, but still nowhere near as good as the random forest.
+
+
+##Final Model
+Considering the difference in accuracy, I keep the random forest model. I retrain the model while taking out some of the useless variables to simplify the model, and test its out of sample error on the "test set"
+
+```{r}
+set.seed(123)
+
+#Getting the useless columns out of the training testing and validation sets
+newTrain <- trainData %>% dplyr::select(-c(1:7))
+newTest <- testData %>% dplyr::select(-c(1:7))
+ft <- finalTest %>% dplyr::select(-c(1:7))
+
+#Retraining the model
+modRF2 <- randomForest(classe ~., data = newTrain)
+
+
+#Testing the out of sample error on the "testing set" used as validation
+predicTreeV2 <- predict(modRF2, newdata = ft)
+
+confusionMatrix(predicTreeV2, ft$classe)
+```
+We obtain an accuracy of 99.9%, which is more than satisfying.
+
+
+
